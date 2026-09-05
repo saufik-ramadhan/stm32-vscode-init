@@ -1,5 +1,7 @@
 # stm32-vscode-init
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Turns an STM32CubeMX-generated CMake project into a ready-to-use VS Code
 workspace, wired to **STM32CubeCLT**, without adding anything to your
 global PATH/environment. Works on Windows, Linux and macOS.
