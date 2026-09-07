@@ -41,6 +41,14 @@ class ToolchainProfile:
     name = "base"
     toolchain_cmake_file = "cmake/gcc-arm-none-eabi.cmake"
 
+    #: Short id used to name generated CMake presets and their build
+    #: dirs: "clt" -> preset clt-Debug, build dir build/clt-Debug.
+    preset_prefix = "tc"
+
+    #: Prefix for generated editor task labels ("STM32" -> "STM32: Build
+    #: (Debug)"), so they are easy to find in a fuzzy task picker.
+    task_prefix = None
+
     def detect(self, project_dir: Path) -> float:
         """Return 0.0-1.0 confidence this profile applies to project_dir."""
         raise NotImplementedError
@@ -62,9 +70,28 @@ class ToolchainProfile:
     def find_svd(self, tc: ResolvedToolchain, device):
         return None
 
-    def flash_task(self, tc: ResolvedToolchain, project_name: str, config: str) -> dict:
-        """Return {"command": ..., "args": [...]} for a standalone Flash task."""
+    def flash_task(self, tc: ResolvedToolchain, elf_path: str) -> dict:
+        """Return {"command": ..., "args": [...]} that flashes elf_path.
+
+        elf_path is already expressed with the calling editor's own
+        workspace-root variable, so profiles must not build it themselves.
+        """
         raise NotImplementedError
+
+    def erase_task(self, tc: ResolvedToolchain):
+        """Return {"command": ..., "args": [...]} for a full chip erase,
+        or None if this toolchain has no such tool."""
+        return None
+
+    def gdb_server_task(self, tc: ResolvedToolchain, port: int):
+        """Return {"command": ..., "args": [...]} for a GDB server listening
+        on port, or None if the toolchain ships no GDB server."""
+        return None
+
+    def clangd_query_driver(self, tc: ResolvedToolchain) -> str:
+        """Glob clangd may run to learn the cross-compiler's built-in
+        include paths and target (clangd --query-driver)."""
+        return str(Path(tc.gcc).parent / "*")
 
     def debug_config(self, tc: ResolvedToolchain, project_name: str, device, svd_path) -> DebugConfig:
         raise NotImplementedError

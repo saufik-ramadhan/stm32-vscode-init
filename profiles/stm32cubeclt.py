@@ -97,6 +97,8 @@ def _read_text(path: Path) -> str:
 
 class STM32CubeCLTProfile(ToolchainProfile):
     name = "stm32cubeclt"
+    preset_prefix = "clt"
+    task_prefix = "STM32"
 
     def detect(self, project_dir: Path) -> float:
         if list(project_dir.glob("*.ioc")):
@@ -168,15 +170,40 @@ class STM32CubeCLTProfile(ToolchainProfile):
             matches = list(tc.svd_dir.glob(f"{base}*.[sS][vV][dD]"))
         return matches[0] if matches else None
 
-    def flash_task(self, tc: STM32CubeCLTToolchain, project_name: str, config: str) -> dict:
+    def flash_task(self, tc: STM32CubeCLTToolchain, elf_path: str) -> dict:
         return {
             "command": str(tc.programmer_cli),
             "args": [
                 "--connect", "port=SWD", "mode=NORMAL", "reset=HWrst",
-                "--download", f"${{workspaceFolder}}/build/{config}/{project_name}.elf",
+                "--download", elf_path,
                 "--start",
             ],
         }
+
+    def erase_task(self, tc: STM32CubeCLTToolchain) -> dict:
+        return {
+            "command": str(tc.programmer_cli),
+            "args": ["--connect", "port=SWD", "mode=UR", "--erase", "all"],
+        }
+
+    def gdb_server_task(self, tc: STM32CubeCLTToolchain, port: int) -> dict:
+        # -d selects SWD and is *not* optional: without it the server tries
+        # JTAG and dies with "No device found on target" on SWD-only probes
+        # such as the on-board ST-LINK of a NUCLEO board - even though
+        # STM32_Programmer_CLI connects to the same board just fine.
+        # -e keeps the server alive across GDB sessions, -s verifies the
+        # download, -k connects under reset, -cp lets it find the flash
+        # loaders that ship with STM32CubeProgrammer.
+        return {
+            "command": str(tc.gdbserver),
+            "args": [
+                "-p", str(port), "-l", "1", "-e", "-s", "-k", "-d", "-m", "0",
+                "-cp", str(tc.programmer_bin_dir),
+            ],
+        }
+
+    def clangd_query_driver(self, tc: STM32CubeCLTToolchain) -> str:
+        return str(tc.gcc_bin_dir / "arm-none-eabi-*")
 
     def debug_config(self, tc: STM32CubeCLTToolchain, project_name: str, device, svd_path) -> DebugConfig:
         fields = {
