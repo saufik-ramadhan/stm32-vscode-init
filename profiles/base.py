@@ -63,6 +63,9 @@ class ToolchainProfile:
         """Return human-readable strings for any expected tool that's missing."""
         return []
 
+    def configure_project(self, project_dir: Path, args, device, dry_run: bool):
+        """Optionally prepare generated firmware for this profile's uploader."""
+
     def detect_device(self, project_dir: Path):
         """Return an MCU device string for the debugger, or None."""
         return None

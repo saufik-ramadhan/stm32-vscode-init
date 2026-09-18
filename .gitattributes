@@ -1,0 +1,3 @@
+# Preserve the upstream v2.2.1 CLI source byte-for-byte. Its historical
+# whitespace is intentional vendor content, not generator source style.
+tools/hid-flash/src/** whitespace=-trailing-space,-blank-at-eof

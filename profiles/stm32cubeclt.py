@@ -5,12 +5,14 @@ beyond Cortex-Debug/C++/CMake Tools.
 """
 import glob
 import re
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from osutil import IS_WINDOWS, IS_MAC, exe
 from profiles.base import ToolchainProfile, ResolvedToolchain, DebugConfig
+from profiles.serasidis_hid import configure_serasidis_f103
 
 
 @dataclass
@@ -20,6 +22,11 @@ class STM32CubeCLTToolchain(ResolvedToolchain):
     gdbserver: Path = None
     svd_dir: Path = None
     gcc_bin_dir: Path = None
+    objcopy: Path = None
+    flash_method: str = "stlink"
+    hid_flash: Path = None
+    hid_port: str = None
+    hid_delay: int = None
 
 
 def _candidate_clt_roots():
@@ -95,6 +102,12 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="ignore")
 
 
+def _bundled_hid_flash() -> Path:
+    platform_dir = "windows" if IS_WINDOWS else ("macos" if IS_MAC else "linux")
+    filename = "hid-flash.exe" if IS_WINDOWS else "hid-flash"
+    return Path(__file__).resolve().parent.parent / "tools" / "hid-flash" / "bin" / platform_dir / filename
+
+
 class STM32CubeCLTProfile(ToolchainProfile):
     name = "stm32cubeclt"
     preset_prefix = "clt"
@@ -109,6 +122,31 @@ class STM32CubeCLTProfile(ToolchainProfile):
 
     def add_cli_arguments(self, parser):
         parser.add_argument("--clt-path", help="Path to your STM32CubeCLT_x.y.z install (auto-detected if omitted)")
+        parser.add_argument(
+            "--flash-method", choices=("stlink", "hid"), default="stlink",
+            help="Firmware uploader used by generated tasks (default: stlink)",
+        )
+        parser.add_argument(
+            "--hid-flash",
+            help="Path to hid-flash executable (default: auto-detect tools/hid-flash[.exe] or PATH)",
+        )
+        parser.add_argument(
+            "--hid-port",
+            help="Serial/CDC port for automatic bootloader entry (default: a non-existent dummy port for manual HID mode)",
+        )
+        parser.add_argument(
+            "--hid-delay", type=int,
+            help="Optional hid-flash delay after toggling the serial port, in microseconds",
+        )
+        parser.add_argument(
+            "--hid-app-setup", choices=("auto", "on", "off"), default="auto",
+            help="Prepare an STM32F103 CubeMX CDC application for the Serasidis bootloader "
+                 "(default: auto when --flash-method hid)",
+        )
+        parser.add_argument(
+            "--hid-usb-delay-ms", type=int, default=1000,
+            help="D+ disconnect/re-enumeration delay added by HID app setup (default: 1000 ms)",
+        )
 
     def resolve_toolchain(self, project_dir: Path, args) -> STM32CubeCLTToolchain:
         clt_root = _pick_clt_root(args)
@@ -118,6 +156,19 @@ class STM32CubeCLTProfile(ToolchainProfile):
         ninja_bin_dir = clt_root / "Ninja" / "bin"
         programmer_bin_dir = clt_root / "STM32CubeProgrammer" / "bin"
         gdbserver_bin_dir = clt_root / "STLink-gdb-server" / "bin"
+        hid_flash = None
+        if args.hid_flash:
+            candidate = Path(args.hid_flash).expanduser()
+            if not candidate.is_absolute():
+                candidate = project_dir / candidate
+            hid_flash = candidate.resolve()
+        else:
+            names = ["hid-flash.exe", "hid-flash"] if IS_WINDOWS else ["hid-flash", "hid-flash.exe"]
+            candidates = [project_dir / "tools" / name for name in names]
+            candidates.append(_bundled_hid_flash())
+            candidates += [Path(found) for name in names if (found := shutil.which(name))]
+            hid_flash = next((path.resolve() for path in candidates if path.is_file()), None)
+
         return STM32CubeCLTToolchain(
             gcc=gcc_bin_dir / exe("arm-none-eabi-gcc"),
             gxx=gcc_bin_dir / exe("arm-none-eabi-g++"),
@@ -130,6 +181,11 @@ class STM32CubeCLTProfile(ToolchainProfile):
             gdbserver=gdbserver_bin_dir / exe("ST-LINK_gdbserver"),
             svd_dir=clt_root / "STMicroelectronics_CMSIS_SVD",
             gcc_bin_dir=gcc_bin_dir,
+            objcopy=gcc_bin_dir / exe("arm-none-eabi-objcopy"),
+            flash_method=args.flash_method,
+            hid_flash=hid_flash,
+            hid_port=args.hid_port or ("COM256" if IS_WINDOWS else "stm32-hid-manual"),
+            hid_delay=args.hid_delay,
         )
 
     def check(self, tc: STM32CubeCLTToolchain) -> list:
@@ -141,12 +197,41 @@ class STM32CubeCLTProfile(ToolchainProfile):
             ("ninja", tc.ninja),
             ("STM32_Programmer_CLI", tc.programmer_cli),
             ("ST-LINK_gdbserver", tc.gdbserver),
+            ("arm-none-eabi-objcopy", tc.objcopy),
         ]:
             if not path.is_file():
                 missing.append(f"  - {label}: expected at {path}")
+        if tc.flash_method == "hid" and (tc.hid_flash is None or not tc.hid_flash.is_file()):
+            missing.append(
+                "  - hid-flash: not found; put it in <project>/tools or pass --hid-flash <path>"
+            )
         return missing
 
+    def configure_project(self, project_dir: Path, args, device, dry_run: bool):
+        enabled = args.hid_app_setup == "on" or (
+            args.hid_app_setup == "auto" and args.flash_method == "hid"
+        )
+        if enabled:
+            configure_serasidis_f103(
+                project_dir, device, args.hid_usb_delay_ms, dry_run,
+                required=args.hid_app_setup == "on",
+            )
+
     def detect_device(self, project_dir: Path):
+        # The .ioc carries the concrete ordering code (for example
+        # STM32F103C8T6),
+        # while generated CMake often only contains a broad family symbol
+        # such as STM32F1xx. Prefer the concrete value and remove CubeMX's
+        # two-character package suffix (Tx, Ux, ...).
+        for ioc in project_dir.glob("*.ioc"):
+            text = _read_text(ioc)
+            m = re.search(r"(?m)^Mcu\.CPN=(STM32[A-Z0-9]+)$", text)
+            if m:
+                return m.group(1)
+            m = re.search(r"(?m)^Mcu\.Name=(STM32[A-Z0-9]+)$", text)
+            if m:
+                return re.sub(r"[A-Z]x$", "", m.group(1))
+
         search_files = [
             project_dir / "cmake" / "stm32cubemx" / "CMakeLists.txt",
             project_dir / "CMakeLists.txt",
@@ -165,13 +250,35 @@ class STM32CubeCLTProfile(ToolchainProfile):
         if not device or not tc.svd_dir.is_dir():
             return None
         base = device[:-2] if device.endswith("xx") else device
-        matches = list(tc.svd_dir.glob(f"{base}*.svd"))
-        if not matches:
-            matches = list(tc.svd_dir.glob(f"{base}*.[sS][vV][dD]"))
-        return matches[0] if matches else None
+        prefixes = [base]
+        family = re.match(r"(STM32[A-Z][A-Z0-9]{3})", base)
+        if family and family.group(1) not in prefixes:
+            prefixes.append(family.group(1))
+        for prefix in prefixes:
+            matches = list(tc.svd_dir.glob(f"{prefix}*.svd"))
+            if not matches:
+                matches = list(tc.svd_dir.glob(f"{prefix}*.[sS][vV][dD]"))
+            if matches:
+                return matches[0]
+        return None
 
     def flash_task(self, tc: STM32CubeCLTToolchain, elf_path: str) -> dict:
+        if tc.flash_method == "hid":
+            bin_path = re.sub(r"\.elf$", ".bin", elf_path, flags=re.IGNORECASE)
+            args = [bin_path, tc.hid_port]
+            if tc.hid_delay is not None:
+                args.append(str(tc.hid_delay))
+            return {
+                "label": "Flash via HID",
+                "command": str(tc.hid_flash) if tc.hid_flash else "hid-flash",
+                "args": args,
+                "pre_commands": [{
+                    "command": str(tc.objcopy),
+                    "args": ["-O", "binary", elf_path, bin_path],
+                }],
+            }
         return {
+            "label": "Flash via ST-Link",
             "command": str(tc.programmer_cli),
             "args": [
                 "--connect", "port=SWD", "mode=NORMAL", "reset=HWrst",

@@ -146,6 +146,12 @@ def main():
         print("WARNING: could not auto-detect MCU device string; pass --device STM32XXxx and re-run, "
               "or edit the generated debug configuration afterwards.")
 
+    try:
+        profile.configure_project(project_dir, args, device, args.dry_run)
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
+
     svd_path = profile.find_svd(tc, device) if device else None
     if svd_path:
         print(f"SVD file    : {svd_path}")

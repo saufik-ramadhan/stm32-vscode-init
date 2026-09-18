@@ -75,19 +75,37 @@ def build_tasks(ctx):
 
     def flash(config):
         frag = profile.flash_task(tc, ctx.elf(ROOT, f"build/{config}"))
-        return {
-            "label": f"Flash ({config})",
+        prepare_labels = []
+        prepare_tasks = []
+        for index, step in enumerate(frag.get("pre_commands", []), start=1):
+            label = f"Prepare {frag.get('label', 'Flash')} ({config}) #{index}"
+            prepare_labels.append(label)
+            prepare_tasks.append({
+                "label": label,
+                "type": "shell",
+                "command": step["command"],
+                "args": step.get("args", []),
+                "problemMatcher": [],
+            })
+        flash_task = {
+            "label": f"{frag.get('label', 'Flash')} ({config})",
             "type": "shell",
             "command": frag["command"],
-            "args": frag["args"],
+            "args": frag.get("args", []),
             "problemMatcher": [],
             "group": "build",
         }
+        if prepare_labels:
+            flash_task["dependsOn"] = prepare_labels
+            flash_task["dependsOrder"] = "sequence"
+        return prepare_tasks + [flash_task]
 
     def build_flash(config):
+        frag = profile.flash_task(tc, ctx.elf(ROOT, f"build/{config}"))
+        flash_label = frag.get("label", "Flash")
         return {
-            "label": f"Build + Flash ({config})",
-            "dependsOn": [f"Build ({config})", f"Flash ({config})"],
+            "label": f"Build + {flash_label} ({config})",
+            "dependsOn": [f"Build ({config})", f"{flash_label} ({config})"],
             "dependsOrder": "sequence",
             "problemMatcher": [],
             "group": "build",
@@ -104,7 +122,9 @@ def build_tasks(ctx):
 
     tasks = []
     for config in ("Debug", "Release"):
-        tasks += [configure(config), build(config), flash(config), build_flash(config), clean(config)]
+        tasks += [configure(config), build(config)]
+        tasks += flash(config)
+        tasks += [build_flash(config), clean(config)]
 
     return {"version": "2.0.0", "options": global_options, "tasks": tasks}
 
@@ -178,11 +198,14 @@ class VSCodeBackend(EditorBackend):
         append_gitignore(ctx.project_dir, ["build/", ".vscode/"], ctx.dry_run)
 
     def next_steps(self, ctx):
+        flash_label = ctx.profile.flash_task(
+            ctx.tc, ctx.elf(ROOT, "build/Debug")
+        ).get("label", "Flash")
         steps = [
             "Open the project folder in VS Code.",
             "Install the recommended extensions if prompted (Cortex-Debug, C/C++, CMake Tools).",
             "Ctrl+Shift+B (Cmd+Shift+B on macOS) -> 'Build (Debug)' is the default build task.",
-            "Terminal > Run Task... for 'Build + Flash (Debug)' / '(Release)' variants.",
+            f"Terminal > Run Task... for 'Build + {flash_label} (Debug)' / '(Release)' variants.",
             "F5 -> 'Debug (Build + Flash)' to build, flash and start debugging in one go,",
             "  or pick 'Debug (No Rebuild)' to just re-flash+debug the existing binary.",
         ]

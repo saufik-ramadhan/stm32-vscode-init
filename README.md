@@ -42,6 +42,12 @@ Run with no project argument to target the current directory. Useful flags:
 |---|---|
 | `--editor <name>` | `vscode` (default), `zed`, a comma-separated list, or `all` |
 | `--clt-path <dir>` | Point at a specific STM32CubeCLT install instead of auto-detecting |
+| `--flash-method stlink\|hid` | Select ST-Link (default) or the Serasidis STM32 HID bootloader for generated flash tasks |
+| `--hid-flash <file>` | Override `hid-flash`; otherwise use `<project>/tools`, the bundled v2.2.1 tool, or `PATH` |
+| `--hid-port <port>` | Serial/CDC port used to request bootloader mode; omitted means manual HID mode via a safe dummy port |
+| `--hid-delay <us>` | Optional delay passed to `hid-flash` after toggling the serial port |
+| `--hid-app-setup auto\|on\|off` | Configure an STM32F103 CubeMX CDC application for Serasidis HID BL; `auto` enables it with `--flash-method hid` |
+| `--hid-usb-delay-ms <ms>` | D+ disconnect delay before CDC attaches (default: 1000 ms) |
 | `--device STM32XXxx` | Override the MCU device string used by the debugger, if auto-detection fails |
 | `-y` / `--yes` | Non-interactive (picks the newest auto-detected CLT install without prompting) |
 | `--dry-run` | Print what would be written without touching any files |
@@ -54,6 +60,46 @@ alias stm32init='/path/to/stm32-vscode-init/init.sh --editor zed -y'
 # then, in any freshly generated CubeMX project:
 cd ~/STM32Projects/my-new-project && stm32init .
 ```
+
+For a project using the Serasidis HID bootloader:
+
+```powershell
+.\init.ps1 --editor zed --flash-method hid --hid-flash tools\hid-flash.exe --hid-port COM7 C:\path\to\project
+```
+
+`--hid-flash` is optional. This repository includes the official Serasidis
+v2.2.1 executables for Windows, Linux and macOS under `tools/hid-flash/`, plus
+their corresponding source and GPL-2.0 license. A project-local executable
+still takes precedence, followed by the bundled executable and then `PATH`.
+
+Before running it, enable **USB Device FS > Communication Device Class
+(Virtual Port Com)** in CubeMX and generate the project. HID is the upload
+protocol used by the bootloader; the running application must be CDC so
+`hid-flash` can request a reboot through its virtual COM port.
+
+The generated HID flash tasks first convert the ELF to a raw BIN with
+`arm-none-eabi-objcopy`, then run `hid-flash <firmware.bin> <port>`. If the
+board is already held in HID bootloader mode, the port may be an unavailable
+dummy port; `hid-flash` will continue by looking for USB VID:PID `1209:BEBA`.
+
+For an STM32F103 project, `--flash-method hid` also prepares the generated
+firmware automatically and idempotently:
+
+- reserves the first 2 KiB and links the application at `0x08000800`;
+- relocates `VTOR` by `0x800` and defines `USER_VECT_TAB_ADDRESS` for the
+  CubeMX driver target;
+- uses the Serasidis-compatible 72 MHz system clock and derives USB's required
+  48 MHz with PLL / 1.5;
+- initializes CDC before the FreeRTOS scheduler, while holding PA12/D+ low
+  until the USB stack is ready;
+- implements the Arduino-compatible DTR + `1EAF` handshake and writes `0x424C`
+  to `BKP_DR4` before reset;
+- stores the clock values in the `.ioc`, so a later CubeMX Generate Code keeps
+  the working clock configuration.
+
+The default D+ disconnect interval is one second. Override it with
+`--hid-usb-delay-ms`; disable all firmware changes with
+`--hid-app-setup off` when maintaining those details yourself.
 
 Generated files are machine-specific (they contain absolute toolchain paths),
 so the script adds them to `<project>/.gitignore` rather than expecting them to
@@ -73,9 +119,11 @@ be committed - re-run the script after cloning on another machine instead.
   prefixed so they're one fuzzy search away:
   - `Configure (Debug)` / `(Release)`
   - `Build (Debug)` / `(Release)`, `Rebuild`, `Clean`
-  - `Flash (Debug)` / `(Release)` - flashes the existing ELF via
-    `STM32_Programmer_CLI`
-  - `Build + Flash (Debug)` / `(Release)`
+  - `Flash via ST-Link (Debug)` / `(Release)` - flashes the existing ELF via
+    `STM32_Programmer_CLI`; with `--flash-method hid`, these become `Flash via
+    HID` tasks that create and upload a BIN
+  - `Build + Flash via ST-Link (Debug)` / `(Release)`, or `Build + Flash via
+    HID` when selected
   - `Erase chip`, `Size report (Debug)`
   - `GDB server (port 61234)` - ST-LINK GDB server in its own terminal tab
   - `GDB attach (Debug)` - `arm-none-eabi-gdb` connected to that server
@@ -97,8 +145,9 @@ be committed - re-run the script after cloning on another machine instead.
   `bin` directories injected into `PATH` for that task only:
   - `Build (Debug)` - default build task (Ctrl+Shift+B / Cmd+Shift+B)
   - `Build (Release)`
-  - `Flash (Debug)` / `Flash (Release)`
-  - `Build + Flash (Debug)` / `Build + Flash (Release)`
+  - `Flash via ST-Link (Debug)` / `Flash via ST-Link (Release)`, or the HID
+    equivalents when selected
+  - `Build + Flash via ST-Link (Debug)` / `(Release)`, or the HID equivalents
   - `Clean (Debug)` / `Clean (Release)`
 - **`.vscode/launch.json`** - Cortex-Debug configurations (F5):
   - `Debug (Build + Flash)` - rebuilds, flashes, then starts debugging
@@ -117,7 +166,7 @@ Requested workflow -> generated entry:
 |---|---|---|
 | build | Task: `Build (Debug)` (default) | Task: `STM32: Build (Debug)` |
 | build release | Task: `Build (Release)` | Task: `STM32: Build (Release)` |
-| build+flash | Task: `Build + Flash (Debug)` | Task: `STM32: Build + Flash (Debug)` |
+| build+flash | Task: `Build + Flash via ST-Link (Debug)` | Task: `STM32: Build + Flash via ST-Link (Debug)` |
 | build+flash+debug | Launch: `Debug (Build + Flash)` (F5) | Tasks: `GDB server`, then `GDB attach` |
 | debug | Launch: `Debug (No Rebuild)` | as above |
 
@@ -151,6 +200,9 @@ Notes that explain most of the generated content:
   STM32CubeCLT's official `ST-LINK_gdbserver` and `STM32CubeProgrammer` - not
   the third-party `st-util`. A matching `.svd` from STM32CubeCLT is wired in
   automatically for the peripheral register view.
+- **HID is an upload transport, not a debug probe**: selecting
+  `--flash-method hid` changes the generated flash tasks only. GDB/debug
+  entries still require an ST-Link or another supported hardware debugger.
 - **Debugging in Zed**: Zed's GDB debug adapter drives `gdb -i dap`, and that
   interpreter only exists in a GDB built with Python. ST ships
   `arm-none-eabi-gdb` built `--without-python`, so the script probes for a GDB
@@ -164,9 +216,22 @@ Notes that explain most of the generated content:
 
 - **"compiler not found" during configure**: double-check `--clt-path`, or
   that your STM32CubeCLT install has a `GNU-tools-for-STM32/bin` folder.
-- **Flash fails to connect**: check the board is plugged in and `port=SWD`
+- **ST-Link flash fails to connect**: check the board is plugged in and `port=SWD`
   matches your debug probe; run the exact command from the generated task in a
   terminal to see the full `STM32_Programmer_CLI` output.
+- **HID flash cannot find `1209:BEBA`**: verify the board is in bootloader
+  mode, and set `--hid-port` to the application's actual CDC port if you want
+  `hid-flash` to request bootloader entry automatically.
+- **Application never starts after HID upload**: the Serasidis F1 bootloader
+  leaves SYSCLK on its 72 MHz PLL and jumps directly to `0x08000800`. A CubeMX
+  application configured for a different active PLL (for example 48 MHz,
+  PLL x6) enters `Error_Handler()` when HAL tries to reconfigure it. Rerun this
+  script with `--flash-method hid` to apply the matching 72 MHz / USB 48 MHz
+  setup.
+- **Windows reports Device Descriptor Request Failed**: this is earlier than
+  CDC driver loading. Check the 48 MHz USB clock and use the generated clean
+  PA12/D+ detach/attach sequence; increasing `--hid-usb-delay-ms` is useful
+  for diagnosis but cannot repair a wrong clock.
 - **`ST-LINK error (DEV_CONNECT_ERR)`**: something else already owns the
   probe - almost always a `GDB server` task still running in another terminal
   tab. Only one process can hold the ST-LINK at a time; stop the server first.
