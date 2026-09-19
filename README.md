@@ -67,6 +67,19 @@ For a project using the Serasidis HID bootloader:
 .\init.ps1 --editor zed --flash-method hid --hid-flash tools\hid-flash.exe --hid-port COM7 C:\path\to\project
 ```
 
+On Linux, pass only the device name to the bundled `hid-flash`, not its full
+path. The bundled v2.2.1 uploader prepends `/dev/` itself:
+
+```bash
+./init.sh --editor zed --flash-method hid \
+  --hid-flash tools/hid-flash/bin/linux/hid-flash \
+  --hid-port ttyACM0 /path/to/project
+```
+
+Using `--hid-port /dev/ttyACM0` would make this uploader try to open
+`/dev//dev/ttyACM0`. If the board can move between ACM numbers, check its
+current name with `ls -l /dev/serial/by-id/` before regenerating the tasks.
+
 `--hid-flash` is optional. This repository includes the official Serasidis
 v2.2.1 executables for Windows, Linux and macOS under `tools/hid-flash/`, plus
 their corresponding source and GPL-2.0 license. A project-local executable
@@ -100,6 +113,41 @@ firmware automatically and idempotently:
 The default D+ disconnect interval is one second. Override it with
 `--hid-usb-delay-ms`; disable all firmware changes with
 `--hid-app-setup off` when maintaining those details yourself.
+
+### Linux permissions for HID flashing
+
+The application first appears as a CDC serial device (commonly
+`/dev/ttyACM0`), then reconnects as the Serasidis HID bootloader with USB
+VID:PID `1209:BEBA`. The user running the editor needs access to both stages.
+
+Add the user to the serial and USB-device groups, then log out and back in so
+the editor inherits the new groups:
+
+```bash
+sudo usermod -aG dialout,plugdev "$USER"
+```
+
+Install a udev rule for both `hidraw` and the underlying USB device:
+
+```udev
+# /etc/udev/rules.d/99-stm32-hid-bootloader.rules
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="beba", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="beba", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+```
+
+Reload the rules and reconnect the board:
+
+```bash
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+The `usb` rule is required because the bundled Linux executable uses libusb;
+granting access only to `/dev/hidraw*` is insufficient. A characteristic
+failure is that `hid-flash` prints `device is found` and then segfaults after
+`Sending <reset pages> command...`: enumeration succeeded, but libusb could
+not open the USB device, and this legacy uploader does not handle that failure
+cleanly.
 
 Generated files are machine-specific (they contain absolute toolchain paths),
 so the script adds them to `<project>/.gitignore` rather than expecting them to
@@ -221,7 +269,17 @@ Notes that explain most of the generated content:
   terminal to see the full `STM32_Programmer_CLI` output.
 - **HID flash cannot find `1209:BEBA`**: verify the board is in bootloader
   mode, and set `--hid-port` to the application's actual CDC port if you want
-  `hid-flash` to request bootloader entry automatically.
+  `hid-flash` to request bootloader entry automatically. On Linux, pass a name
+  such as `ttyACM0` without the `/dev/` prefix and apply the CDC/libusb udev
+  permissions described above.
+- **HID setup cannot find a FLASH region at `0x08000000`**: update the script
+  and rerun it. CubeMX may spell the same address as compact `0x8000000`; the
+  current setup accepts both spellings and also recognizes an already-offset
+  `0x8000800`/`0x08000800` region.
+- **Linux HID upload finds `1209:BEBA` then segfaults at `reset pages`**: the
+  bootloader is present but its `/dev/bus/usb` node is not accessible. The
+  udev rule must include `SUBSYSTEM=="usb"`; a `hidraw`-only rule does not
+  cover the libusb backend.
 - **Application never starts after HID upload**: the Serasidis F1 bootloader
   leaves SYSCLK on its 72 MHz PLL and jumps directly to `0x08000800`. A CubeMX
   application configured for a different active PLL (for example 48 MHz,

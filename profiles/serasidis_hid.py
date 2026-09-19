@@ -30,10 +30,12 @@ def _configure_linker(project_dir: Path, dry_run: bool):
     candidates = list(project_dir.glob("*FLASH*.ld")) + list(project_dir.glob("*.ld"))
     for path in dict.fromkeys(candidates):
         old = read_text(path)
-        if re.search(r"FLASH\s*\(rx\).*ORIGIN\s*=\s*0x08000800", old, re.I):
+        # CubeMX emits both zero-padded (0x08000000) and compact
+        # (0x8000000) STM32 addresses depending on its version/platform.
+        if re.search(r"FLASH\s*\(rx\).*ORIGIN\s*=\s*0x0*8000800\b", old, re.I):
             return
         pattern = re.compile(
-            r"(FLASH\s*\(rx\)\s*:\s*ORIGIN\s*=\s*)0x08000000"
+            r"(FLASH\s*\(rx\)\s*:\s*ORIGIN\s*=\s*)0x0*8000000\b"
             r"(\s*,\s*LENGTH\s*=\s*)(\d+)K", re.I,
         )
         match = pattern.search(old)
